@@ -15,8 +15,38 @@ progressbar.streams.wrap_stderr()
 logging.basicConfig(level=logging.INFO)
 
 
-def fancy_table(pattern):
+def fancy_board(pattern):
     return tabulate.tabulate(pattern, tablefmt='fancy_grid')
+
+
+def fancy(table, codes):
+    table = copy.deepcopy(table)
+    grid_width = 1
+    for line in table:
+        grid_width = max(grid_width, max([len(x) for x in line]))
+    for line in table:
+        for i in range(len(line)):
+            line[i] = f"{line[i]: ^{grid_width}}"
+    contents = tabulate.tabulate(table, tablefmt="fancy_grid").split('\n')
+    for code in codes:
+        expended_code = f"{code: ^{grid_width}}"
+        for i in range(1, len(contents), 2):
+            for match in re.finditer(r"(?<={0})\s*│\s*(?={0})".format(expended_code), contents[i]):
+                contents[i] = contents[i][:match.start()] + '█' * \
+                    (match.end() - match.start()) + contents[i][match.end():]
+        for i in range(1, len(contents) - 2, 2):
+            curr = [(x.start(), x.end()) for x in re.finditer(
+                r"(?<=[\s█]){}(?=[\s█])".format(expended_code), contents[i])]
+            if len(curr) > 0:
+                next = [(x.start(), x.end()) for x in re.finditer(
+                    r"(?<=[\s█]){}(?=[\s█])".format(expended_code), contents[i + 2])]
+                for p in curr:
+                    if p in next:
+                        contents[i + 1] = contents[i + 1][:p[0]] + \
+                            '█' * (p[1] - p[0]) + contents[i + 1][p[1]:]
+        for i in range(1, len(contents), 2):
+            contents[i] = re.sub(expended_code, '█' * grid_width, contents[i])
+    return '\n'.join(contents)
 
 
 def load_board(pattern, groups):
@@ -104,7 +134,6 @@ def is_placable(board, tile, x, y):
 
 
 def place_tile(board, tile, x, y):
-    board = copy.deepcopy(board)
     for i in range(len(tile[0])):
         if tile[0][i]:
             y = y - i
@@ -113,11 +142,21 @@ def place_tile(board, tile, x, y):
         for j in range(len(tile[0])):
             if tile[i][j]:
                 board[x + i][y + j] = tile[i][j]
-    return board
 
 
-def dfs(board, tiles, used):
-    if all(used):
+def remove_tile(board, tile, x, y):
+    for i in range(len(tile[0])):
+        if tile[0][i]:
+            y = y - i
+            break
+    for i in range(len(tile)):
+        for j in range(len(tile[0])):
+            if tile[i][j]:
+                board[x + i][y + j] = None
+
+
+def dfs(board, tiles, used, remain):
+    if remain == 0:
         return [copy.deepcopy(board)]
     results = []
     x = 0
@@ -136,8 +175,9 @@ def dfs(board, tiles, used):
         used[i] = True
         for tile in tiles[i]:
             if is_placable(board, tile, x, y):
-                new_board = place_tile(board, tile, x, y)
-                results = results + dfs(new_board, tiles, used)
+                place_tile(board, tile, x, y)
+                results = results + dfs(board, tiles, used, remain - 1)
+                remove_tile(board, tile, x, y)
         used[i] = False
     return results
 
@@ -166,7 +206,7 @@ def f(board, tiles, grids):
                 board[x][y] = ' '
     for i in range(len(positions)):
         board[positions[i][0]][positions[i][1]] = grids[i]
-    results = dfs(copy.deepcopy(board), tiles, [False] * len(tiles))
+    results = dfs(board, tiles, [False] * len(tiles), len(tiles))
     return results
 
 
@@ -195,16 +235,7 @@ def search_all(board, tiles, groups):
     return statistic
 
 
-def generate_md_single(grids, results, used_time):
-    def fancy(table):
-        table = copy.deepcopy(table)
-        grid_width = 1
-        for line in table:
-            grid_width = max(grid_width, max([len(x) for x in line]))
-        for line in table:
-            for i in range(len(line)):
-                line[i] = f"{line[i]: ^{grid_width}}"
-        return tabulate.tabulate(table, tablefmt="fancy_grid")
+def generate_md_single(board, grids, results, codes, used_time):
     grid_str = "-".join(grids)
     os.makedirs("results", exist_ok=True)
     with open(f"results/{grid_str}.md", "w") as f:
@@ -213,16 +244,20 @@ def generate_md_single(grids, results, used_time):
             f"{'':=^20}",
             f"+ search time: {used_time:0.3f}s",
             f"+ solution count: {len(results)}",
-            "",
+            "+ board:",
+            "~~~",
             "",
         ]
+        f.write('\n'.join(content))
+        f.write(fancy_board(board))
+        content = ["", "~~~", "", ""]
         f.write('\n'.join(content))
         for i in range(len(results)):
             content = [
                 f"Solution #{i + 1}",
                 f"{'':-^20}",
                 "~~~",
-                fancy(results[i]),
+                fancy(results[i], codes),
                 "~~~",
                 "",
                 "",
@@ -242,7 +277,7 @@ def main(config_file, grids):
     """
     config = yaml.safe_load(config_file)
     board = load_board(config["board"], config["groups"])
-    logging.info("original board: \n{}".format(fancy_table(board)))
+    logging.info("original board: \n{}".format(fancy_board(board)))
     tiles = []
     for tile in config["tiles"]:
         tiles.append(load_tile(tile["code"], tile["shape"]))
@@ -252,7 +287,7 @@ def main(config_file, grids):
         end = datetime.datetime.now()
         logging.info("{}: {} results, used {:0.3f}s".format(
             "-".join(grids), len(results), (end - start).total_seconds()))
-        generate_md_single(grids, results, (end - start).total_seconds())
+        generate_md_single(board, grids, results, [tile["code"] for tile in config["tiles"]], (end - start).total_seconds())
     else:
         start = datetime.datetime.now()
         results = search_all(board, tiles, config["groups"])
